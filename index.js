@@ -217,8 +217,18 @@ app.get('/health', (req, res) => {
 // Update the endpoint to match frontend request
 app.get('/local-images', async (req, res) => {
   try {
+    console.log("Received request for local images");
     const uploadsDir = path.join(__dirname, 'uploads');
+    console.log("Checking uploads directory:", uploadsDir);
+    
+    // Check if directory exists
+    if (!fs.existsSync(uploadsDir)) {
+      console.log("Uploads directory does not exist, creating it");
+      fs.mkdirSync(uploadsDir, { recursive: true });
+    }
+    
     const files = await fs.promises.readdir(uploadsDir);
+    console.log("Found files in uploads directory:", files);
     
     const images = await Promise.all(
       files.map(async (filename) => {
@@ -230,7 +240,7 @@ app.get('/local-images', async (req, res) => {
           originalName: filename,
           size: stats.size,
           createdAt: stats.birthtime,
-          path: `/api/uploads/${filename}`
+          path: `/uploads/${filename}`
         };
       })
     );
@@ -241,10 +251,15 @@ app.get('/local-images', async (req, res) => {
       return ['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext);
     });
 
+    console.log("Sending response with image files:", imageFiles);
     res.json(imageFiles);
   } catch (error) {
     console.error('Error listing local images:', error);
-    res.status(500).json({ error: 'Failed to list local images' });
+    res.status(500).json({ 
+      error: 'Failed to list local images',
+      details: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 });
 
