@@ -8,35 +8,108 @@ const cloudinary = require('cloudinary').v2;
   }
 });
 
+// Configure Cloudinary
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET
 });
 
-async function uploadImage(localPath, originalName) {
-  return cloudinary.uploader.upload(localPath, {
-    folder: 'cloudapp',
-    use_filename: true,
-    filename_override: originalName,
-  });
-}
-
-// Add a test log to verify the response from Cloudinary
-async function fetchResource(publicId) {
+// Upload image to Cloudinary
+const uploadImage = async (filePath, originalName) => {
   try {
-    const resource = await cloudinary.api.resource(publicId);
-    console.log("Cloudinary resource fetched successfully:", resource);
-    return resource;
-  } catch (error) {
-    console.error("Error fetching Cloudinary resource:", error);
-    throw error; // Re-throw the error for further handling
+    console.log("Uploading to Cloudinary:", filePath);
+    const result = await cloudinary.uploader.upload(filePath, {
+      resource_type: "auto",
+      public_id: originalName.split('.')[0] // Remove extension
+    });
+    console.log("Upload successful:", result);
+    return result;
+  } catch (err) {
+    console.error("Error uploading to Cloudinary:", err);
+    throw err;
   }
-}
+};
 
-async function deleteResource(publicId) {
-  return cloudinary.uploader.destroy(publicId);
-}
+// Check if resource exists in Cloudinary
+const fetchResource = async (publicId) => {
+  try {
+    console.log("Checking Cloudinary resource:", publicId);
+    
+    // First try to get resource details
+    try {
+      // Try with and without file extension
+      const result = await cloudinary.api.resource(publicId);
+      console.log("Resource exists (via API):", result.public_id);
+      return {
+        exists: true,
+        url: result.secure_url,
+        publicId: result.public_id
+      };
+    } catch (apiError) {
+      console.log("API check failed, trying URL check");
+      
+      // Try different URL formats
+      const urlFormats = [
+        `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload/${publicId}`,
+        `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload/${publicId}.jpg`,
+        `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload/${publicId}.png`
+      ];
+
+      for (const url of urlFormats) {
+        try {
+          console.log("Trying URL:", url);
+          const resp = await fetch(url, { 
+            method: "HEAD",
+            headers: {
+              'User-Agent': 'Mozilla/5.0',
+              'Accept': 'image/*'
+            }
+          });
+          
+          if (resp.ok) {
+            console.log("Resource exists (via URL):", url);
+            return {
+              exists: true,
+              url: url,
+              publicId: publicId
+            };
+          }
+        } catch (urlError) {
+          console.log("URL check failed:", url);
+          continue;
+        }
+      }
+      
+      console.log("Resource not found:", publicId);
+      return {
+        exists: false,
+        url: null,
+        publicId: null
+      };
+    }
+  } catch (err) {
+    console.error("Error checking Cloudinary resource:", err);
+    return {
+      exists: false,
+      url: null,
+      publicId: null
+    };
+  }
+};
+
+// Delete resource from Cloudinary
+const deleteResource = async (publicId) => {
+  try {
+    console.log("Deleting Cloudinary resource:", publicId);
+    const result = await cloudinary.uploader.destroy(publicId);
+    console.log("Delete successful:", result);
+    return result;
+  } catch (err) {
+    console.error("Error deleting from Cloudinary:", err);
+    throw err;
+  }
+};
 
 const checkCloudinaryImage = async (url) => {
   try {
@@ -98,4 +171,9 @@ const checkCloudinaryImage = async (url) => {
   }
 };
 
-module.exports = { uploadImage, fetchResource, deleteResource, checkCloudinaryImage };
+module.exports = {
+  uploadImage,
+  fetchResource,
+  deleteResource,
+  checkCloudinaryImage
+};

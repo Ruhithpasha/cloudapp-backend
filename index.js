@@ -4,14 +4,6 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const { uploadImage, fetchResource, deleteResource } = require('./cloudinary');
-const {
-  getDB,
-  setDB,
-  findImageById,
-  updateImageRecord,
-  deleteImageById,
-  syncDBWithFiles
-} = require('./database');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -19,9 +11,10 @@ const UPLOAD_DIR = path.join(__dirname, 'uploads');
 
 // Middleware
 app.use(cors({
-  origin: process.env.FRONTEND_URL || '*', // Replace with your Vercel frontend URL in production
+  origin: process.env.FRONTEND_URL || '*',
   methods: ['GET', 'POST', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
 }));
 app.use(express.json());
 
@@ -30,6 +23,7 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Ensure upload directory exists
 if (!fs.existsSync(UPLOAD_DIR)) {
+  console.log('Creating uploads directory:', UPLOAD_DIR);
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }
 
@@ -39,7 +33,9 @@ const storage = multer.diskStorage({
     cb(null, UPLOAD_DIR);
   },
   filename: function (req, file, cb) {
-    cb(null, Date.now() + '-' + file.originalname);
+    // Sanitize filename to prevent path traversal
+    const sanitizedFilename = file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_');
+    cb(null, Date.now() + '-' + sanitizedFilename);
   }
 });
 
@@ -58,163 +54,53 @@ const upload = multer({
 // Routes
 // Upload endpoint: saves locally and uploads to Cloudinary
 app.post('/upload', upload.single('image'), async (req, res) => {
-  const file = req.file;
-  if (!file) {
-    return res.status(400).json({ error: 'No file uploaded' });
-  }
-  
   try {
-    // Use helper for Cloudinary upload
-    const result = await uploadImage(file.path, file.originalname);
+    console.log("Received upload request");
     
-    // Save metadata
-    const db = getDB();
-    const imageData = {
-      id: Date.now().toString(),
-      filename: file.filename,
-      originalName: file.originalname,
-      localPath: file.path,
-      cloudinaryUrl: result.secure_url,
-      cloudinaryPublicId: result.public_id,
-      uploadedAt: new Date().toISOString(),
-      backupKey: req.body.backupKey || null,
-      backupData: req.body.backupData || null,
+    if (!req.file) {
+      console.error("No file uploaded");
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+  
+    console.log("File details:", {
+      filename: req.file.filename,
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+      path: req.file.path
+    });
+
+    // Upload to Cloudinary
+    console.log("Uploading to Cloudinary...");
+    const cloudinaryResult = await uploadImage(req.file.path, req.file.originalname);
+    console.log("Cloudinary upload successful:", cloudinaryResult);
+
+    // Create response object
+    const image = {
+      id: req.file.filename,
+      filename: req.file.filename,
+      originalName: req.file.originalname,
+      path: `/uploads/${req.file.filename}`,
+      cloudinaryUrl: cloudinaryResult.secure_url,
+      cloudinaryPublicId: cloudinaryResult.public_id,
+      size: req.file.size,
+      createdAt: new Date().toISOString(),
       status: 'available'
     };
-    
-    db.push(imageData);
-    setDB(db);
-    
-    res.status(201).json({ 
-      message: 'Image uploaded successfully', 
-      data: imageData 
+
+    console.log("Created image entry:", image);
+    res.json(image);
+  } catch (error) {
+    console.error('Error uploading image:', error);
+    res.status(500).json({ 
+      error: 'Failed to upload image',
+      details: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
-  } catch (err) {
-    console.error('Upload error:', err);
-    // Clean up the uploaded file if Cloudinary upload fails
-    if (file.path && fs.existsSync(file.path)) {
-      fs.unlinkSync(file.path);
-    }
-    res.status(500).json({ error: 'Failed to upload image', details: err.message });
   }
 });
 
-// List all images with integrity check
-app.get('/images', async (req, res) => {
-  try {
-    syncDBWithFiles(); // Ensures DB is up-to-date with actual files
-    const db = getDB();
-    const imagesWithStatus = await Promise.all(db.map(async img => {
-      try {
-        // Check if local file exists
-        const hasLocalFile = fs.existsSync(img.localPath);
-        
-        // Use helper to check Cloudinary resource
-        await fetchResource(img.cloudinaryPublicId);
-        return { 
-          ...img, 
-          status: 'available',
-          hasLocalFile 
-        };
-      } catch (err) {
-        // Image not found in Cloudinary
-        return { 
-          ...img, 
-          status: 'missing',
-          hasLocalFile: fs.existsSync(img.localPath)
-        };
-      }
-    }));
-    
-    res.json(imagesWithStatus);
-  } catch (err) {
-    console.error('Error fetching images:', err);
-    res.status(500).json({ error: 'Failed to fetch images', details: err.message });
-  }
-});
-
-// Restore image to Cloudinary if it's missing
-app.post('/restore/:id', async (req, res) => {
-  const { id } = req.params;
-  const img = findImageById(id);
-  
-  if (!img) {
-    return res.status(404).json({ error: 'Image not found' });
-  }
-  
-  // Add debugging logs to verify the restore process
-  console.log("Restoring image with ID:", id);
-  console.log("Local path of the image:", img.localPath);
-
-  try {
-    // Check if local file exists
-    if (!fs.existsSync(img.localPath)) {
-      console.error("Local file not found:", img.localPath);
-      return res.status(404).json({ error: 'Local image file not found' });
-    }
-    
-    // Use helper to re-upload to Cloudinary
-    const result = await uploadImage(img.localPath, img.originalName);
-    
-    // Update metadata
-    img.cloudinaryUrl = result.secure_url;
-    img.cloudinaryPublicId = result.public_id;
-    img.restoredAt = new Date().toISOString();
-    img.status = 'available';
-    updateImageRecord(img);
-    
-    res.json({ 
-      message: 'Image restored to Cloudinary', 
-      data: img 
-    });
-  } catch (err) {
-    console.error('Restore error:', err);
-    res.status(500).json({ error: 'Failed to restore image', details: err.message });
-  }
-});
-
-// Delete image
-app.delete('/images/:id', async (req, res) => {
-  const { id } = req.params;
-  const img = findImageById(id);
-  
-  if (!img) {
-    return res.status(404).json({ error: 'Image not found' });
-  }
-  
-  try {
-    // Use helper to delete from Cloudinary
-    try {
-      await deleteResource(img.cloudinaryPublicId);
-    } catch (cloudErr) {
-      console.warn('Could not delete from Cloudinary:', cloudErr.message);
-    }
-    
-    // Delete local file
-    try {
-      if (fs.existsSync(img.localPath)) {
-        fs.unlinkSync(img.localPath);
-      }
-    } catch (fsErr) {
-      console.warn('Could not delete local file:', fsErr.message);
-    }
-    
-    // Remove from database
-    deleteImageById(id);
-    
-    res.json({ message: 'Image deleted successfully' });
-  } catch (err) {
-    console.error('Delete error:', err);
-    res.status(500).json({ error: 'Failed to delete image', details: err.message });
-  }
-});
-
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
-// Update the endpoint to match frontend request
+// List all images
 app.get('/local-images', async (req, res) => {
   try {
     console.log("Received request for local images");
@@ -232,16 +118,83 @@ app.get('/local-images', async (req, res) => {
     
     const images = await Promise.all(
       files.map(async (filename) => {
-        const filePath = path.join(uploadsDir, filename);
-        const stats = await fs.promises.stat(filePath);
-        
-        return {
-          filename,
-          originalName: filename,
-          size: stats.size,
-          createdAt: stats.birthtime,
-          path: `/uploads/${filename}`
-        };
+        try {
+          const filePath = path.join(uploadsDir, filename);
+          const stats = await fs.promises.stat(filePath);
+          
+          // Extract public ID from filename (remove timestamp and extension)
+          const parts = filename.split('-');
+          const timestamp = parts[0];
+          const rest = parts.slice(1).join('-');
+          const publicId = rest.split('.')[0];
+          
+          console.log("Processing file:", {
+            filename,
+            timestamp,
+            publicId
+          });
+          
+          // Check if file exists in Cloudinary
+          const cloudinaryResult = await fetchResource(publicId);
+          console.log("Cloudinary check result:", cloudinaryResult);
+          
+          // If not found, try with timestamp
+          if (!cloudinaryResult.exists) {
+            console.log("Trying with timestamp included");
+            const cloudinaryResultWithTimestamp = await fetchResource(filename.split('.')[0]);
+            if (cloudinaryResultWithTimestamp.exists) {
+              console.log("Found with timestamp");
+              return {
+                id: filename,
+                filename,
+                originalName: filename,
+                size: stats.size,
+                createdAt: stats.birthtime,
+                path: `/uploads/${filename}`,
+                cloudinaryUrl: cloudinaryResultWithTimestamp.url,
+                cloudinaryPublicId: cloudinaryResultWithTimestamp.publicId,
+                status: 'available',
+                canRestore: false
+              };
+            }
+          }
+
+          // Check if local file exists and is readable
+          const localFileExists = await fs.promises.access(filePath, fs.constants.R_OK)
+            .then(() => true)
+            .catch(() => false);
+          
+          console.log("Local file check:", {
+            filename,
+            exists: localFileExists
+          });
+          
+          return {
+            id: filename,
+            filename,
+            originalName: filename,
+            size: stats.size,
+            createdAt: stats.birthtime,
+            path: `/uploads/${filename}`,
+            cloudinaryUrl: cloudinaryResult.url,
+            cloudinaryPublicId: cloudinaryResult.publicId,
+            status: cloudinaryResult.exists ? 'available' : 'missing',
+            canRestore: !cloudinaryResult.exists && localFileExists // Can restore if missing from Cloudinary but exists locally
+          };
+        } catch (err) {
+          console.error(`Error processing file ${filename}:`, err);
+          // Return basic info if there's an error
+          return {
+            id: filename,
+            filename,
+            originalName: filename,
+            path: `/uploads/${filename}`,
+            cloudinaryUrl: null,
+            cloudinaryPublicId: null,
+            status: 'missing',
+            canRestore: true // Assume it can be restored if we hit an error
+          };
+        }
       })
     );
 
@@ -260,6 +213,48 @@ app.get('/local-images', async (req, res) => {
       details: error.message,
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
+  }
+});
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Restore image to Cloudinary if it's missing
+app.post('/restore/:filename', async (req, res) => {
+  const { filename } = req.params;
+  console.log("Restore request received for filename:", filename);
+  
+  try {
+    // Get the local file path
+    const localPath = path.join(__dirname, 'uploads', filename);
+    console.log("Local path of the image:", localPath);
+
+    // Check if local file exists
+    if (!fs.existsSync(localPath)) {
+      console.error("Local file not found:", localPath);
+      return res.status(404).json({ error: 'Local image file not found' });
+    }
+    
+    // Use helper to re-upload to Cloudinary
+    console.log("Uploading to Cloudinary...");
+    const result = await uploadImage(localPath, filename);
+    console.log("Cloudinary upload successful:", result);
+    
+    // Return success response
+    res.json({ 
+      message: 'Image restored to Cloudinary', 
+      data: {
+        filename: filename,
+        cloudinaryUrl: result.secure_url,
+        cloudinaryPublicId: result.public_id,
+        status: 'available'
+      }
+    });
+  } catch (err) {
+    console.error('Restore error:', err);
+    res.status(500).json({ error: 'Failed to restore image', details: err.message });
   }
 });
 
