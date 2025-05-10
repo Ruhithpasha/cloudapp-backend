@@ -70,10 +70,33 @@ app.post('/upload', upload.single('image'), async (req, res) => {
       path: req.file.path
     });
 
-    // Upload to Cloudinary
-    console.log("Uploading to Cloudinary...");
-    const cloudinaryResult = await uploadImage(req.file.path, req.file.originalname);
-    console.log("Cloudinary upload successful:", cloudinaryResult);
+    // Verify file exists locally before uploading to Cloudinary
+    if (!fs.existsSync(req.file.path)) {
+      console.error("Local file not found after upload:", req.file.path);
+      return res.status(500).json({ error: 'Failed to save file locally' });
+    }
+
+    // Upload to Cloudinary with retry
+    let cloudinaryResult;
+    let retryCount = 0;
+    const maxRetries = 3;
+
+    while (retryCount < maxRetries) {
+      try {
+        console.log(`Uploading to Cloudinary (attempt ${retryCount + 1})...`);
+        cloudinaryResult = await uploadImage(req.file.path, req.file.originalname);
+        console.log("Cloudinary upload successful:", cloudinaryResult);
+        break;
+      } catch (err) {
+        retryCount++;
+        console.error(`Cloudinary upload attempt ${retryCount} failed:`, err);
+        if (retryCount === maxRetries) {
+          throw new Error(`Failed to upload to Cloudinary after ${maxRetries} attempts: ${err.message}`);
+        }
+        // Wait before retrying
+        await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
+      }
+    }
 
     // Create response object
     const image = {
@@ -92,6 +115,15 @@ app.post('/upload', upload.single('image'), async (req, res) => {
     res.json(image);
   } catch (error) {
     console.error('Error uploading image:', error);
+    // Clean up local file if Cloudinary upload failed
+    if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+      try {
+        fs.unlinkSync(req.file.path);
+        console.log("Cleaned up local file after failed upload");
+      } catch (cleanupErr) {
+        console.error("Failed to clean up local file:", cleanupErr);
+      }
+    }
     res.status(500).json({ 
       error: 'Failed to upload image',
       details: error.message,
